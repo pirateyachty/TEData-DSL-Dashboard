@@ -130,7 +130,7 @@
 
         async function fetchAndDisplayData() {
             try {
-                const response = await fetch('https://json.greenviewegypt.com/dsl_data.json?' + new Date().getTime());
+                const response = await fetch('/dsl_data.json?' + new Date().getTime());
                 const data = await response.json();
                 accountsData = data.accounts;
                 const utcTime = data.timestamp;
