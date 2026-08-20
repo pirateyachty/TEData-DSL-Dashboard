@@ -104,6 +104,27 @@
         .account-updated {
             text-align: left;
         }
+
+        .expiry-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+        .usage-pace {
+            font-size: 0.9em;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+        .usage-pace.on-pace {
+            color: #6BA368;
+        }
+        .usage-pace.fast {
+            color: #F44336;
+        }
+        .usage-pace.slow {
+            color: #E69500;
+        }
         .last-updated {
             text-align: center;
             margin-top: 20px;
@@ -143,6 +164,83 @@
             }
         }
 
+
+        function parseWeDate(dateString) {
+            if (!dateString) return null;
+
+            const match = dateString.match(
+                /(\d{2})\/(\d{2})\/(\d{4}) at (\d{2}):(\d{2}) (AM|PM)/
+            );
+
+            if (!match) return null;
+
+            let [, day, month, year, hour, minute, ampm] = match;
+            hour = parseInt(hour, 10);
+
+            if (ampm === 'PM' && hour !== 12) hour += 12;
+            if (ampm === 'AM' && hour === 12) hour = 0;
+
+            // Use UTC here only as a timezone-neutral way to compare the
+            // provider's renewal and expiration wall-clock dates.
+            return new Date(Date.UTC(
+                parseInt(year, 10),
+                parseInt(month, 10) - 1,
+                parseInt(day, 10),
+                hour,
+                parseInt(minute, 10)
+            ));
+        }
+
+        function getUsagePace(account) {
+            const usedGB = parseFloat(account.usedGB);
+            const remainGB = parseFloat(account.remainGB);
+            const daysUntilExp = parseFloat(account.daysUntilExp);
+            const renewed = parseWeDate(account.renewedDate);
+            const expires = parseWeDate(account.expDate);
+
+            if (
+                !Number.isFinite(usedGB) ||
+                !Number.isFinite(remainGB) ||
+                !Number.isFinite(daysUntilExp) ||
+                !renewed ||
+                !expires
+            ) {
+                return { text: 'On Pace', className: 'on-pace' };
+            }
+
+            const totalCycleDays = (expires - renewed) / (1000 * 60 * 60 * 24);
+            const elapsedDays = totalCycleDays - daysUntilExp;
+
+            if (elapsedDays <= 0 || usedGB <= 0) {
+                return { text: 'On Pace', className: 'on-pace' };
+            }
+
+            const dailyUsage = usedGB / elapsedDays;
+            const projectedDaysRemaining = remainGB / dailyUsage;
+
+            // A projection within ±2 days of expiration counts as On Pace.
+            if (Math.abs(projectedDaysRemaining - daysUntilExp) <= 2) {
+                return { text: 'On Pace', className: 'on-pace' };
+            }
+
+            if (projectedDaysRemaining < daysUntilExp) {
+                return {
+                    text: `Using Fast · ~${Math.max(1, Math.round(projectedDaysRemaining))} days`,
+                    className: 'fast'
+                };
+            }
+
+            const projectedRemaining = Math.max(
+                0,
+                remainGB - (dailyUsage * daysUntilExp)
+            );
+
+            return {
+                text: `Using Slow · ~${Math.round(projectedRemaining)} GB Unused`,
+                className: 'slow'
+            };
+        }
+
         function sortAndDisplay() {
             if (currentSort === 'usage') {
                 accountsData.sort((a, b) => parseFloat(b.usagePrc) - parseFloat(a.usagePrc));
@@ -157,6 +255,7 @@
                 const usagePrc = parseFloat(account.usagePrc);
                 const lndNumber = account.lnd_number.substring(3);
                 const accountTitle = account.ApartmentNumber || lndNumber;
+                const pace = getUsagePace(account);
 
                 let colorClass = 'green';
                 if (usagePrc >= 75) colorClass = 'red';
@@ -167,7 +266,10 @@
                 accountDiv.innerHTML = `
                     <h2><i class="fa-solid fa-user"></i> <span class="account-title">${accountTitle}</span></h2>
                     <p><i class="fa-solid fa-gift"></i> Offer: ${account.offerName}</p>
-                    <p><i class="fa-solid fa-calendar-days"></i> Expires in ${account.daysUntilExp} days</p>
+                    <p class="expiry-info">
+                        <span><i class="fa-solid fa-calendar-days"></i> Expires in ${account.daysUntilExp} days</span>
+                        <span class="usage-pace ${pace.className}">${pace.text}</span>
+                    </p>
                     <div class="progress-bar">
                         <div class="progress ${colorClass}" style="width: ${usagePrc}%;"></div>
                     </div>
