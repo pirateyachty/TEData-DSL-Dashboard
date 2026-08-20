@@ -225,7 +225,7 @@
 
             if (projectedDaysRemaining < daysUntilExp) {
                 return {
-                    text: `Using Fast · ~${Math.max(1, Math.round(projectedDaysRemaining))} days`,
+                    text: `Too Fast · ~${Math.max(1, Math.round(projectedDaysRemaining))} days`,
                     className: 'fast'
                 };
             }
@@ -236,7 +236,7 @@
             );
 
             return {
-                text: `Using Slow · ~${Math.round(projectedRemaining)} GB Unused`,
+                text: `Too Slow · ~${Math.round(projectedRemaining)} GB Unused`,
                 className: 'slow'
             };
         }
