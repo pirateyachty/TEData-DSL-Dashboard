@@ -1,0 +1,382 @@
+import argparse
+import datetime
+import json
+import os
+import subprocess
+import time
+
+import pytz
+
+local_timezone = pytz.timezone("Africa/Cairo")
+
+# Paths (portable between the local checkout and /opt/dsl_dashboard)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+ACCOUNTS_FILE_PATH = os.path.join(SCRIPT_DIR, "accounts.json")
+MAIN_SCRIPT_PATH = os.path.join(SCRIPT_DIR, "main.py")
+JSON_FILE_PATH = os.path.join(PROJECT_ROOT, "output", "dsl_data.json")
+
+DEFAULT_DELAY = 10
+
+def log(message, blank_before=False):
+    timestamp = datetime.datetime.now(local_timezone).strftime(
+        "%Y-%m-%d %H:%M:%S %Z"
+    )
+    if blank_before:
+        print("", flush=True)
+    print(f"{timestamp} - {message}", flush=True)
+
+def load_accounts():
+    """Load private account configuration from accounts.json."""
+    try:
+        with open(ACCOUNTS_FILE_PATH, "r") as file:
+            accounts = json.load(file)
+    except FileNotFoundError:
+        raise SystemExit(f"Account file not found: {ACCOUNTS_FILE_PATH}")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Invalid JSON in {ACCOUNTS_FILE_PATH}: {exc}")
+
+    if not isinstance(accounts, list) or not accounts:
+        raise SystemExit(f"No accounts found in {ACCOUNTS_FILE_PATH}")
+
+    return accounts
+
+
+def select_account(accounts, selector):
+    """Select one account by 1-based list number, DSL number, or apartment name."""
+    selector = selector.strip()
+
+    if selector.isdigit():
+        index = int(selector)
+        if 1 <= index <= len(accounts):
+            return accounts[index - 1]
+
+    for account in accounts:
+        if account.get("lnd_number") == selector:
+            return account
+
+    matches = [
+        account
+        for account in accounts
+        if account.get("apartment", "").casefold() == selector.casefold()
+    ]
+    if len(matches) == 1:
+        return matches[0]
+
+    raise ValueError(
+        f"No unique account matched {selector!r}. "
+        f"Use an account number 1-{len(accounts)}, the DSL number, "
+        "or the exact apartment name."
+    )
+
+
+def parse_selector(accounts, selector):
+    """
+    Expand a selector into an ordered list of accounts.
+
+    Supported examples:
+      5
+      1-10
+      10-1
+      1,3,7,12
+      1-5,9,12-10
+      all
+      <DSL number>
+      <exact apartment name>
+    """
+    selector = selector.strip()
+
+    if not selector:
+        raise SystemExit("Account selector cannot be empty.")
+
+    if selector.casefold() == "all":
+        return list(accounts)
+
+    selected = []
+
+    # Commas are intended for combining account numbers/ranges. A single
+    # non-comma selector can still be a DSL number or exact apartment name.
+    parts = [part.strip() for part in selector.split(",")]
+
+    for part in parts:
+        if not part:
+            raise SystemExit(f"Invalid empty selector in {selector!r}")
+
+        if part.casefold() == "all":
+            selected.extend(accounts)
+            continue
+
+        # Numeric range, including reverse ranges such as 19-11.
+        if "-" in part:
+            pieces = part.split("-")
+            if (
+                len(pieces) == 2
+                and pieces[0].strip().isdigit()
+                and pieces[1].strip().isdigit()
+            ):
+                start = int(pieces[0])
+                end = int(pieces[1])
+
+                if not (1 <= start <= len(accounts)):
+                    raise SystemExit(
+                        f"Range start {start} is outside 1-{len(accounts)}."
+                    )
+                if not (1 <= end <= len(accounts)):
+                    raise SystemExit(
+                        f"Range end {end} is outside 1-{len(accounts)}."
+                    )
+
+                step = 1 if end >= start else -1
+                selected.extend(
+                    accounts[index - 1]
+                    for index in range(start, end + step, step)
+                )
+                continue
+
+        try:
+            selected.append(select_account(accounts, part))
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+
+    # Remove accidental duplicates while preserving requested order.
+    unique = []
+    seen = set()
+    for account in selected:
+        key = account.get("lnd_number")
+        if key not in seen:
+            unique.append(account)
+            seen.add(key)
+
+    if not unique:
+        raise SystemExit("No accounts selected.")
+
+    return unique
+
+
+def load_existing_data():
+    """Load the current dashboard dataset, accepting old wrapped/unwrapped formats."""
+    if not os.path.exists(JSON_FILE_PATH):
+        return {"timestamp": None, "accounts": []}
+
+    try:
+        with open(JSON_FILE_PATH, "r") as file:
+            loaded = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Cannot merge into invalid {JSON_FILE_PATH}: {exc}")
+
+    if isinstance(loaded, dict) and isinstance(loaded.get("accounts"), list):
+        return loaded
+
+    if isinstance(loaded, list):
+        # Backward compatibility with an unwrapped scraper result.
+        return {"timestamp": None, "accounts": loaded}
+
+    raise SystemExit(f"Unexpected structure in {JSON_FILE_PATH}")
+
+
+def write_dataset(data):
+    """Write the dashboard dataset."""
+    os.makedirs(os.path.dirname(JSON_FILE_PATH), exist_ok=True)
+    with open(JSON_FILE_PATH, "w") as file:
+        json.dump(data, file, indent=4)
+
+
+def merge_account(existing_data, fresh_account):
+    """Replace one account in the current dataset while retaining all others."""
+    lnd_number = fresh_account.get("lnd_number")
+
+    merged_accounts = []
+    replaced = False
+
+    for item in existing_data.get("accounts", []):
+        if item.get("lnd_number") == lnd_number:
+            merged_accounts.append(fresh_account)
+            replaced = True
+        else:
+            merged_accounts.append(item)
+
+    if not replaced:
+        merged_accounts.append(fresh_account)
+
+    return {
+        "timestamp": existing_data.get("timestamp"),
+        "accounts": merged_accounts,
+    }
+
+
+def run_account(account, current_data):
+    """
+    Run main.py for one account.
+
+    On success, return (updated_data, True).
+    On failure, restore current_data and return (current_data, False).
+    """
+    lnd_number = account["lnd_number"]
+    lnd_pass = account["lnd_pass"]
+    apartment = account["apartment"]
+
+    log(f"Running account: {lnd_number} ({apartment})")
+
+    # main.py writes its scrape result to dsl_data.json. Temporarily remove the
+    # live merged dataset, let main.py create a fresh one-account result, then
+    # merge that result back into the saved in-memory dataset.
+    if os.path.exists(JSON_FILE_PATH):
+        os.remove(JSON_FILE_PATH)
+
+    try:
+        subprocess.run(
+            ["python3", "-u", MAIN_SCRIPT_PATH, lnd_number, lnd_pass, apartment],
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        write_dataset(current_data)
+        log(
+            f"FAILED {lnd_number} ({apartment}): exit code {exc.returncode}. "
+            "Previous account data retained."
+        )
+        return current_data, False
+
+    if not os.path.exists(JSON_FILE_PATH):
+        write_dataset(current_data)
+        log(
+            f"FAILED {lnd_number} ({apartment}): main.py did not create "
+            f"{JSON_FILE_PATH}. Previous account data retained."
+        )
+        return current_data, False
+
+    try:
+        with open(JSON_FILE_PATH, "r") as file:
+            fresh_result = json.load(file)
+    except json.JSONDecodeError as exc:
+        write_dataset(current_data)
+        log(
+            f"FAILED {lnd_number} ({apartment}): invalid JSON from main.py: {exc}. "
+            "Previous account data retained."
+        )
+        return current_data, False
+
+    if isinstance(fresh_result, dict) and isinstance(fresh_result.get("accounts"), list):
+        fresh_accounts = fresh_result["accounts"]
+    elif isinstance(fresh_result, list):
+        fresh_accounts = fresh_result
+    else:
+        write_dataset(current_data)
+        log(
+            f"FAILED {lnd_number} ({apartment}): unexpected JSON structure. "
+            "Previous account data retained."
+        )
+        return current_data, False
+
+    fresh_account = next(
+        (item for item in fresh_accounts if item.get("lnd_number") == lnd_number),
+        None,
+    )
+
+    if fresh_account is None:
+        write_dataset(current_data)
+        log(
+            f"FAILED {lnd_number} ({apartment}): fresh result did not contain "
+            "the requested account. Previous account data retained."
+        )
+        return current_data, False
+
+    updated_data = merge_account(current_data, fresh_account)
+    write_dataset(updated_data)
+
+    log(
+        f"SUCCESS {lnd_number} ({apartment}); "
+        f"{len(updated_data['accounts'])} account(s) retained."
+    )
+
+    return updated_data, True
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the DSL collector for one or more accounts from accounts.json."
+        ),
+        epilog=(
+            "Examples: 5 | 1-10 | 10-1 | 1,3,7,12 | 1-5,9,12-10 | all"
+        ),
+    )
+    parser.add_argument(
+        "account",
+        help=(
+            "Account selector: number, range, reverse range, comma-separated "
+            "selection, 'all', DSL number, or exact apartment name"
+        ),
+    )
+    parser.add_argument(
+        "--delay",
+        type=int,
+        default=DEFAULT_DELAY,
+        help=(
+            f"Seconds to wait between selected accounts "
+            f"(default: {DEFAULT_DELAY})"
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.delay < 0:
+        raise SystemExit("--delay cannot be negative.")
+
+    accounts = load_accounts()
+    selected_accounts = parse_selector(accounts, args.account)
+    current_data = load_existing_data()
+
+    log("*" * 80, blank_before=True)
+    log(
+        f"Starting DSL dashboard collection for {len(selected_accounts)} "
+        f"account(s): {args.account}"
+    )
+
+    successful = 0
+    failed = 0
+
+    for position, account in enumerate(selected_accounts, start=1):
+        log(
+            f"\nStarting account {position}/{len(selected_accounts)}: "
+            f"{account['lnd_number']} ({account['apartment']})"
+        )
+
+        current_data, ok = run_account(account, current_data)
+
+        if ok:
+            successful += 1
+        else:
+            failed += 1
+
+        if position < len(selected_accounts) and args.delay:
+            log(
+                f"Waiting {args.delay} seconds before the next account..."
+            )
+            time.sleep(args.delay)
+
+    # "timestamp" is the global Last Run value. Individual account timestamps
+    # remain whatever main.py last successfully collected for each account.
+
+    if successful > 0:
+        utc_now = datetime.datetime.now(pytz.utc)
+        current_data["timestamp"] = utc_now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        write_dataset(current_data)
+
+        log(
+            f"\nBatch complete: {successful} successful, {failed} failed. "
+            f"Last Run updated to {current_data['timestamp']}."
+        )
+    else:
+        write_dataset(current_data)
+
+        log(
+            f"\nBatch complete: {successful} successful, {failed} failed. "
+            "Last Run unchanged because no accounts were successfully updated."
+        )
+
+    # Return a failure exit code if any selected account failed. This is useful
+    # to systemd/log monitoring while still allowing the entire batch to run.
+    if failed:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

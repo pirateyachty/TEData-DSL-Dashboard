@@ -1,0 +1,21 @@
+{
+  "name": "GreenView Egypt - DSL Accounts",
+  "short_name": "GreenView DSL",
+  "description": "Monitor DSL account usage for GreenView Egypt",
+  "icons": [
+    {
+      "src": "icons/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-180x180.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ],
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#006400"
+}

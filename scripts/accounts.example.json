@@ -1,0 +1,14 @@
+# RENAME THIS FILE accounts.json
+
+[
+  {
+    "lnd_number": "021234567",
+    "lnd_pass": "P@ssword123!",
+    "apartment": "Office"
+  },
+  {
+    "lnd_number": "021234567",
+    "lnd_pass": "Pa$$word123",
+    "apartment": "Apt 2"
+  }
+]
