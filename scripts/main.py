@@ -16,7 +16,12 @@ apartment = sys.argv[3]
 
 acctId = "FBB" + lnd_number[1:]
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-output_file = PROJECT_ROOT / "output" / "dsl_data.json"
+output_file = Path(
+    os.environ.get(
+        "DSL_OUTPUT_FILE",
+        PROJECT_ROOT / "output" / "dsl_data.json",
+    )
+)
 LOGIN_URL = "https://my.te.eg/echannel/#/"
 
 

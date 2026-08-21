@@ -15,6 +15,9 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 ACCOUNTS_FILE_PATH = os.path.join(SCRIPT_DIR, "accounts.json")
 MAIN_SCRIPT_PATH = os.path.join(SCRIPT_DIR, "main.py")
 JSON_FILE_PATH = os.path.join(PROJECT_ROOT, "output", "dsl_data.json")
+TEMP_JSON_FILE_PATH = os.path.join(
+    PROJECT_ROOT, "output", f".dsl_account_{os.getpid()}.json"
+)
 
 DEFAULT_DELAY = 10
 
@@ -175,10 +178,17 @@ def load_existing_data():
 
 
 def write_dataset(data):
-    """Write the dashboard dataset."""
-    os.makedirs(os.path.dirname(JSON_FILE_PATH), exist_ok=True)
-    with open(JSON_FILE_PATH, "w") as file:
+    """Atomically publish the dashboard dataset."""
+    output_dir = os.path.dirname(JSON_FILE_PATH)
+    os.makedirs(output_dir, exist_ok=True)
+
+    temp_path = f"{JSON_FILE_PATH}.tmp"
+    with open(temp_path, "w") as file:
         json.dump(data, file, indent=4)
+        file.flush()
+        os.fsync(file.fileno())
+
+    os.replace(temp_path, JSON_FILE_PATH)
 
 
 def merge_account(existing_data, fresh_account):
@@ -208,8 +218,13 @@ def run_account(account, current_data):
     """
     Run main.py for one account.
 
+    main.py writes the fresh one-account scrape to a scratch file. The live
+    dsl_data.json is left untouched until a successful scrape has been
+    validated, merged, and atomically published.
+
     On success, return (updated_data, True).
-    On failure, restore current_data and return (current_data, False).
+    On failure, leave the live dataset untouched and return
+    (current_data, False).
     """
     lnd_number = account["lnd_number"]
     lnd_pass = account["lnd_pass"]
@@ -217,50 +232,64 @@ def run_account(account, current_data):
 
     log(f"Running account: {lnd_number} ({apartment})")
 
-    # main.py writes its scrape result to dsl_data.json. Temporarily remove the
-    # live merged dataset, let main.py create a fresh one-account result, then
-    # merge that result back into the saved in-memory dataset.
-    if os.path.exists(JSON_FILE_PATH):
-        os.remove(JSON_FILE_PATH)
+    os.makedirs(os.path.dirname(TEMP_JSON_FILE_PATH), exist_ok=True)
+
+    # Remove only a stale scratch file from this caller process. Never remove
+    # the live dsl_data.json before a scrape.
+    if os.path.exists(TEMP_JSON_FILE_PATH):
+        os.remove(TEMP_JSON_FILE_PATH)
+
+    env = os.environ.copy()
+    env["DSL_OUTPUT_FILE"] = TEMP_JSON_FILE_PATH
 
     try:
         subprocess.run(
             ["python3", "-u", MAIN_SCRIPT_PATH, lnd_number, lnd_pass, apartment],
             check=True,
+            env=env,
         )
     except subprocess.CalledProcessError as exc:
-        write_dataset(current_data)
         log(
             f"FAILED {lnd_number} ({apartment}): exit code {exc.returncode}. "
             "Previous account data retained."
         )
         return current_data, False
+    except OSError as exc:
+        log(
+            f"FAILED {lnd_number} ({apartment}): could not run main.py: {exc}. "
+            "Previous account data retained."
+        )
+        return current_data, False
 
-    if not os.path.exists(JSON_FILE_PATH):
-        write_dataset(current_data)
+    if not os.path.exists(TEMP_JSON_FILE_PATH):
         log(
             f"FAILED {lnd_number} ({apartment}): main.py did not create "
-            f"{JSON_FILE_PATH}. Previous account data retained."
+            f"{TEMP_JSON_FILE_PATH}. Previous account data retained."
         )
         return current_data, False
 
     try:
-        with open(JSON_FILE_PATH, "r") as file:
+        with open(TEMP_JSON_FILE_PATH, "r") as file:
             fresh_result = json.load(file)
-    except json.JSONDecodeError as exc:
-        write_dataset(current_data)
+    except (json.JSONDecodeError, OSError) as exc:
         log(
-            f"FAILED {lnd_number} ({apartment}): invalid JSON from main.py: {exc}. "
-            "Previous account data retained."
+            f"FAILED {lnd_number} ({apartment}): could not read valid JSON "
+            f"from main.py: {exc}. Previous account data retained."
         )
         return current_data, False
+    finally:
+        try:
+            os.remove(TEMP_JSON_FILE_PATH)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log(f"WARNING: could not remove scratch file {TEMP_JSON_FILE_PATH}: {exc}")
 
     if isinstance(fresh_result, dict) and isinstance(fresh_result.get("accounts"), list):
         fresh_accounts = fresh_result["accounts"]
     elif isinstance(fresh_result, list):
         fresh_accounts = fresh_result
     else:
-        write_dataset(current_data)
         log(
             f"FAILED {lnd_number} ({apartment}): unexpected JSON structure. "
             "Previous account data retained."
@@ -273,7 +302,6 @@ def run_account(account, current_data):
     )
 
     if fresh_account is None:
-        write_dataset(current_data)
         log(
             f"FAILED {lnd_number} ({apartment}): fresh result did not contain "
             "the requested account. Previous account data retained."
