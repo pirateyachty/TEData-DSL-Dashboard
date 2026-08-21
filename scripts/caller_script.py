@@ -2,6 +2,7 @@ import argparse
 import datetime
 import json
 import os
+import signal
 import subprocess
 import time
 
@@ -19,7 +20,8 @@ TEMP_JSON_FILE_PATH = os.path.join(
     PROJECT_ROOT, "output", f".dsl_account_{os.getpid()}.json"
 )
 
-DEFAULT_DELAY = 10
+DEFAULT_DELAY = 5
+ACCOUNT_TIMEOUT = 120  # Hard limit for one main.py scrape, in seconds.
 
 def log(message, blank_before=False):
     timestamp = datetime.datetime.now(local_timezone).strftime(
@@ -242,18 +244,47 @@ def run_account(account, current_data):
     env = os.environ.copy()
     env["DSL_OUTPUT_FILE"] = TEMP_JSON_FILE_PATH
 
+    process = None
     try:
-        subprocess.run(
+        # Start each scrape in its own process group. If it hangs, this lets us
+        # terminate main.py together with any Playwright/browser child processes.
+        process = subprocess.Popen(
             ["python3", "-u", MAIN_SCRIPT_PATH, lnd_number, lnd_pass, apartment],
-            check=True,
             env=env,
+            start_new_session=True,
         )
-    except subprocess.CalledProcessError as exc:
+        return_code = process.wait(timeout=ACCOUNT_TIMEOUT)
+
+        if return_code != 0:
+            log(
+                f"FAILED {lnd_number} ({apartment}): exit code {return_code}. "
+                "Previous account data retained."
+            )
+            return current_data, False
+
+    except subprocess.TimeoutExpired:
         log(
-            f"FAILED {lnd_number} ({apartment}): exit code {exc.returncode}. "
-            "Previous account data retained."
+            f"FAILED {lnd_number} ({apartment}): timed out after "
+            f"{ACCOUNT_TIMEOUT} seconds. Terminating scrape; previous account "
+            "data retained."
         )
+
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+
         return current_data, False
+
     except OSError as exc:
         log(
             f"FAILED {lnd_number} ({apartment}): could not run main.py: {exc}. "
