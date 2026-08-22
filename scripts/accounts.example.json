@@ -4,11 +4,13 @@
   {
     "lnd_number": "021234567",
     "lnd_pass": "P@ssword123!",
-    "apartment": "Office"
+    "apartments": ["Office"],
+    "location": "Tech Closet"
   },
   {
-    "lnd_number": "021234567",
+    "lnd_number": "027654321",
     "lnd_pass": "Pa$$word123",
-    "apartment": "Apt 2"
+    "apartments": ["Apt 2", "Apt 3"],
+    "location": "In Apartment"
   }
 ]

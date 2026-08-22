@@ -23,6 +23,52 @@ TEMP_JSON_FILE_PATH = os.path.join(
 DEFAULT_DELAY = 5
 ACCOUNT_TIMEOUT = 120  # Hard limit for one main.py scrape, in seconds.
 
+
+def format_assignment(account):
+    """Build the existing human-friendly dashboard label from structured assignments."""
+    apartments = account.get("apartments", [])
+    if not apartments:
+        return account.get("lnd_number", "Unknown")
+
+    if len(apartments) == 1:
+        label = apartments[0]
+    else:
+        first = apartments[0]
+        rest = [
+            item[4:] if item.startswith("Apt ") else item
+            for item in apartments[1:]
+        ]
+        label = first + " & " + " & ".join(rest)
+
+    # Preserve the useful "(in apt)" dashboard cue when the modem is physically
+    # located in one of the apartments it serves.
+    if account.get("location") in apartments and account.get("location", "").startswith("Apt "):
+        label += " (in apt)"
+
+    return label
+
+
+def validate_account_config(account, index):
+    """Validate the structured accounts.json schema."""
+    if not isinstance(account, dict):
+        raise SystemExit(f"Account entry {index} is not a JSON object.")
+
+    for key in ("lnd_number", "lnd_pass", "location"):
+        value = account.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise SystemExit(f"Account entry {index} has invalid or missing {key!r}.")
+
+    apartments = account.get("apartments")
+    if (
+        not isinstance(apartments, list)
+        or not apartments
+        or any(not isinstance(item, str) or not item.strip() for item in apartments)
+    ):
+        raise SystemExit(
+            f"Account {account.get('lnd_number', index)} must have a non-empty "
+            "'apartments' list."
+        )
+
 def log(message, blank_before=False):
     timestamp = datetime.datetime.now(local_timezone).strftime(
         "%Y-%m-%d %H:%M:%S %Z"
@@ -44,6 +90,9 @@ def load_accounts():
     if not isinstance(accounts, list) or not accounts:
         raise SystemExit(f"No accounts found in {ACCOUNTS_FILE_PATH}")
 
+    for index, account in enumerate(accounts, start=1):
+        validate_account_config(account, index)
+
     return accounts
 
 
@@ -63,7 +112,13 @@ def select_account(accounts, selector):
     matches = [
         account
         for account in accounts
-        if account.get("apartment", "").casefold() == selector.casefold()
+        if (
+            format_assignment(account).casefold() == selector.casefold()
+            or any(
+                apartment.casefold() == selector.casefold()
+                for apartment in account.get("apartments", [])
+            )
+        )
     ]
     if len(matches) == 1:
         return matches[0]
@@ -71,7 +126,7 @@ def select_account(accounts, selector):
     raise ValueError(
         f"No unique account matched {selector!r}. "
         f"Use an account number 1-{len(accounts)}, the DSL number, "
-        "or the exact apartment name."
+        "or an apartment/assignment name."
     )
 
 
@@ -231,7 +286,7 @@ def run_account(account, current_data):
     """
     lnd_number = account["lnd_number"]
     lnd_pass = account["lnd_pass"]
-    apartment = account["apartment"]
+    apartment = format_assignment(account)
 
     log(f"Running account: {lnd_number} ({apartment})")
 
@@ -396,7 +451,7 @@ def main():
     for position, account in enumerate(selected_accounts, start=1):
         log(
             f"\nStarting account {position}/{len(selected_accounts)}: "
-            f"{account['lnd_number']} ({account['apartment']})"
+            f"{account['lnd_number']} ({format_assignment(account)})"
         )
 
         current_data, ok = run_account(account, current_data)
