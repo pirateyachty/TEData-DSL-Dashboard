@@ -161,7 +161,7 @@ def parse_selector(accounts, selector):
 def load_existing_data():
     """Load the current dashboard dataset, accepting old wrapped/unwrapped formats."""
     if not os.path.exists(JSON_FILE_PATH):
-        return {"timestamp": None, "accounts": []}
+        return {"accounts": []}
 
     try:
         with open(JSON_FILE_PATH, "r") as file:
@@ -170,11 +170,13 @@ def load_existing_data():
         raise SystemExit(f"Cannot merge into invalid {JSON_FILE_PATH}: {exc}")
 
     if isinstance(loaded, dict) and isinstance(loaded.get("accounts"), list):
-        return loaded
+        # Ignore the legacy top-level "timestamp" field. Account-level
+        # lastUpdated values are the authoritative freshness indicators.
+        return {"accounts": loaded["accounts"]}
 
     if isinstance(loaded, list):
         # Backward compatibility with an unwrapped scraper result.
-        return {"timestamp": None, "accounts": loaded}
+        return {"accounts": loaded}
 
     raise SystemExit(f"Unexpected structure in {JSON_FILE_PATH}")
 
@@ -211,7 +213,6 @@ def merge_account(existing_data, fresh_account):
         merged_accounts.append(fresh_account)
 
     return {
-        "timestamp": existing_data.get("timestamp"),
         "accounts": merged_accounts,
     }
 
@@ -411,25 +412,13 @@ def main():
             )
             time.sleep(args.delay)
 
-    # "timestamp" is the global Last Run value. Individual account timestamps
-    # remain whatever main.py last successfully collected for each account.
+    # Publish the merged account dataset. Freshness/status is derived by the
+    # webpage from each account's lastUpdated value rather than a batch timestamp.
+    write_dataset(current_data)
 
-    if successful > 0:
-        utc_now = datetime.datetime.now(pytz.utc)
-        current_data["timestamp"] = utc_now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        write_dataset(current_data)
-
-        log(
-            f"\nBatch complete: {successful} successful, {failed} failed. "
-            f"Last Run updated to {current_data['timestamp']}."
-        )
-    else:
-        write_dataset(current_data)
-
-        log(
-            f"\nBatch complete: {successful} successful, {failed} failed. "
-            "Last Run unchanged because no accounts were successfully updated."
-        )
+    log(
+        f"\nBatch complete: {successful} successful, {failed} failed."
+    )
 
     # Return a failure exit code if any selected account failed. This is useful
     # to systemd/log monitoring while still allowing the entire batch to run.
