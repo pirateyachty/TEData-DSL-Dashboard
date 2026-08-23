@@ -20,7 +20,7 @@ TEMP_JSON_FILE_PATH = os.path.join(
     PROJECT_ROOT, "output", f".dsl_account_{os.getpid()}.json"
 )
 
-DEFAULT_DELAY = 5
+DEFAULT_DELAY = 10
 ACCOUNT_TIMEOUT = 120  # Hard limit for one main.py scrape, in seconds.
 
 
