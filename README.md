@@ -51,33 +51,67 @@ Create `scripts/accounts.json`.
 The accounts are stored as a JSON array. Their order determines the
 numeric selectors used by `caller_script.py`.
 
+Each account contains:
+
+-   `lnd_number` - WE/TE Data DSL service number
+-   `lnd_pass` - account password
+-   `apartments` - one or more apartments/areas served by the DSL account
+-   `location` - physical location of the DSL modem
+
 ``` json
 [
     {
         "lnd_number": "0123456789",
         "lnd_pass": "password-for-account-1",
-        "apartment": "Office"
+        "apartments": [
+            "Office"
+        ],
+        "location": "17 Closet"
     },
     {
         "lnd_number": "0123456790",
         "lnd_pass": "password-for-account-2",
-        "apartment": "Apartment 1"
+        "apartments": [
+            "Apt 2"
+        ],
+        "location": "17 Closet"
     },
     {
         "lnd_number": "0123456791",
         "lnd_pass": "password-for-account-3",
-        "apartment": "Apartment 2"
+        "apartments": [
+            "Apt 8",
+            "Apt 4"
+        ],
+        "location": "17a Closet"
+    },
+    {
+        "lnd_number": "0123456792",
+        "lnd_pass": "password-for-account-4",
+        "apartments": [
+            "Apt 3"
+        ],
+        "location": "Apt 3"
     }
 ]
 ```
 
+An account may serve more than one apartment. The collector builds the
+human-friendly dashboard assignment from the `apartments` array. For
+example, an account assigned to `Apt 8` and `Apt 4` is displayed as
+`Apt 8 & 4`.
+
+`location` describes the physical location of the DSL modem and is
+independent of the apartment assignment.
+
 In this example:
 
 -   `1` selects `Office`
--   `2` selects `Apartment 1`
--   `3` selects `Apartment 2`
--   `1-3` runs all three in that order
--   `3-1` runs all three in reverse order
+-   `2` selects `Apt 2`
+-   `3` selects the account serving `Apt 8` and `Apt 4`
+-   `1-3` runs the first three accounts in that order
+-   `3-1` runs the first three accounts in reverse order
+-   `Apt 4` selects the account whose assignment includes `Apt 4`
 
 Keep `accounts.json` private because it contains account credentials.
 
@@ -113,8 +147,8 @@ python3 scripts/caller_script.py all
 # WE/TE Data service number
 python3 scripts/caller_script.py 0123456789
 
-# Exact apartment name
-python3 scripts/caller_script.py "Apartment 1"
+# Apartment assignment
+python3 scripts/caller_script.py "Apt 2"
 ```
 
 The default delay between account requests is 10 seconds. It can be
@@ -153,7 +187,7 @@ across an hour boundary.
 For example:
 
 ``` text
-04:50    accounts 1-10
+04:40    accounts 1-10
 05:10    accounts 11-19
 ```
 
