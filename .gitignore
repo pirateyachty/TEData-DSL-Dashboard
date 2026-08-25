@@ -10,6 +10,8 @@ scripts/accounts.json
 
 # Testing Scripts
 scripts/testing/
+scripts/main_session_capture.py
+scripts/test_session_reuse.py
 
 # Local Python virtual environment
 .venve/
