@@ -24,6 +24,7 @@ logs/
 # Runtime/generated data
 output/dsl_data.json
 output/dsl_data.csv
+scripts/session_cache/
 
 # Python
 __pycache__/
