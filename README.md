@@ -3,9 +3,11 @@
 A lightweight dashboard and data collector for monitoring multiple WE/TE
 Data DSL accounts.
 
-The collector logs into each configured account, retrieves current
-package and usage information, and maintains a combined JSON dataset for
-the web dashboard.
+The collector reuses authenticated WE/TE Data sessions when possible and
+retrieves current package and usage information through the portal's API
+endpoints. If a saved session is rejected, the collector automatically
+performs a fresh Playwright login, saves the replacement session, and
+retries the API collection once.
 
 Accounts can be collected individually or in batches. Existing data is
 retained when an individual account fails, allowing the dashboard to
@@ -14,6 +16,11 @@ continue displaying the last successful result for that account.
 ## Features
 
 -   Collect usage data from multiple WE/TE Data accounts
+-   Reuse saved authenticated sessions to avoid unnecessary logins
+-   Automatically refresh authentication when WE/TE Data rejects a saved
+    session
+-   Use Playwright for authentication and direct HTTP requests for usage
+    collection
 -   Select individual accounts, ranges, reverse ranges, or arbitrary
     groups
 -   Preserve the last successful data when an account fails
@@ -29,7 +36,9 @@ continue displaying the last successful result for that account.
 ## Requirements
 
 -   Python 3
--   Playwright / Chromium
+-   `requests`
+-   Playwright
+-   Chromium for Playwright
 -   Internet access to the WE/TE Data customer portal
 
 Install the Python dependencies:
@@ -55,7 +64,8 @@ Each account contains:
 
 -   `lnd_number` - WE/TE Data DSL service number
 -   `lnd_pass` - account password
--   `apartments` - one or more apartments/areas served by the DSL account
+-   `apartments` - one or more apartments/areas served by the DSL
+    account
 -   `location` - physical location of the DSL modem
 
 ``` json
@@ -115,6 +125,85 @@ In this example:
 
 Keep `accounts.json` private because it contains account credentials.
 
+## Authentication and Session Reuse
+
+The collector maintains a separate reusable authentication session for
+each DSL account.
+
+Session files are stored in:
+
+``` text
+scripts/session_cache/
+```
+
+Each account's session file contains the authentication material needed
+to make subsequent API requests, including the token, subscriber ID,
+cookies, and the time the session was captured.
+
+The normal collection flow is:
+
+``` text
+Load saved session
+      |
+      +-- no saved session --> Playwright login
+      |
+      +-- saved session --> try WE/TE Data API
+                               |
+                               +-- accepted --> collect usage
+                               |
+                               +-- rejected --> remove saved session
+                                                    |
+                                                    v
+                                              Playwright login
+                                                    |
+                                                    v
+                                             save new session
+                                                    |
+                                                    v
+                                              collect usage
+```
+
+Playwright is therefore used primarily to establish authentication. Once
+authenticated, the collector retrieves the subscribed offering and quota
+data directly with HTTP requests.
+
+Saved sessions are treated as an optimization, not a requirement. They
+may expire or be invalidated by WE/TE Data. The collector does not
+assume that a session will remain valid for any particular length of
+time.
+
+When WE/TE Data explicitly rejects a saved session, the collector:
+
+1.  Removes the rejected cached session.
+2.  Performs one fresh Playwright login.
+3.  Saves the new authentication session.
+4.  Retries the API collection once.
+
+A freshly authenticated session that is immediately rejected is treated
+as a collection failure. The collector does not repeatedly log in, which
+helps avoid unnecessary authentication attempts.
+
+Network errors, malformed responses, or other collection failures do not
+automatically cause repeated browser logins.
+
+No separate session keepalive process is required. Sessions are tested
+naturally when each account is collected and refreshed when necessary.
+
+### Session Security
+
+Both of the following contain sensitive authentication information and
+must remain private:
+
+``` text
+scripts/accounts.json
+scripts/session_cache/
+```
+
+`accounts.json` contains account passwords. The session cache contains
+reusable authentication material.
+
+Neither should be committed to Git.
+
 ## Running the Collector
 
 General syntax:
@@ -151,16 +240,28 @@ python3 scripts/caller_script.py 0123456789
 python3 scripts/caller_script.py "Apt 2"
 ```
 
-The default delay between account requests is 10 seconds. It can be
-changed with:
+The default delay between accounts is 10 seconds. It can be changed with
+`--delay`:
 
 ``` bash
 python3 scripts/caller_script.py 1-5 --delay 20
 ```
 
+For testing, a shorter delay can also be supplied explicitly:
+
+``` bash
+python3 scripts/caller_script.py 1-5 --delay 1
+```
+
 ## Collection Behavior
 
 Each selected account is processed independently.
+
+For each account, `main.py` first attempts to use the account's cached
+authentication session. If the session is accepted, quota collection
+proceeds without a browser login. If WE/TE Data rejects the saved
+session, the collector refreshes authentication once with Playwright and
+retries using the new session.
 
 When an account succeeds, its existing entry in the combined dataset is
 replaced with newly collected data.
@@ -175,26 +276,33 @@ The global `Last Run` timestamp is updated when at least one account in
 the batch succeeds. If every account in a batch fails, the previous
 `Last Run` timestamp is retained.
 
-## WE/TE Data Request Pacing
+## WE/TE Data Authentication Pacing
 
-Repeated authentication attempts against the WE/TE Data portal appear to
-be subject to rate limiting or other request restrictions.
+Repeated fresh authentication attempts against the WE/TE Data portal
+appear to be subject to rate limiting or other request restrictions.
 
-In testing, reliable operation was achieved by limiting collection to
-**10 or fewer accounts in a batch** and splitting larger collections
-across an hour boundary.
+Testing has shown an apparent limit around 10 fresh logins within an
+hour. This is observed portal behavior, not a documented WE/TE Data API
+limit.
+
+With session reuse, an account collection does not necessarily require a
+login. Accounts with valid cached sessions can be collected directly
+through the API. The pacing concern is therefore primarily the number of
+**fresh Playwright authentication attempts**, rather than simply the
+number of accounts collected.
+
+For unattended operation, larger account sets can still be divided
+around an hour boundary so that the system remains safe even if every
+cached session has expired.
 
 For example:
 
 ``` text
-04:40    accounts 1-10
-05:10    accounts 11-19
+04:45    accounts 1-10
+05:05    accounts 11-19
 ```
 
-The exact schedule is not important. The intent is to avoid sending all
-account authentication requests in one continuous burst.
-
-For a second daily collection, the order can also be reversed:
+A later collection can reverse the order:
 
 ``` text
 accounts 10-1
@@ -203,9 +311,14 @@ accounts 19-11
 
 This prevents the same accounts from always being collected first.
 
-These limits are based on observed portal behavior rather than a
-documented WE/TE Data API limit, so they may need adjustment for
-different deployments.
+The first run on a new installation, a cleared session cache, or a run
+after many sessions have expired may require fresh authentication for
+every selected account. Those situations should be scheduled with the
+observed login restriction in mind.
+
+Because the restriction is based on observed portal behavior rather than
+a published limit, pacing may need adjustment if WE/TE Data changes its
+authentication behavior.
 
 ## systemd
 
@@ -249,6 +362,24 @@ without requiring separate collector scripts.
 When run manually, the collector prints timestamped status information
 directly to the terminal.
 
+Typical session-related messages include:
+
+``` text
+Trying saved session for 0123456789
+Saved session accepted for 0123456789
+```
+
+or, when a cached session has expired:
+
+``` text
+Trying saved session for 0123456789
+getSubscribedOfferings rejected saved session
+Refreshing authentication for 0123456789
+No usable saved session for 0123456789; logging in with Playwright
+Saved reusable session for 0123456789
+Fresh session accepted for 0123456789
+```
+
 When using the example systemd service, output is appended to:
 
 ``` text
@@ -277,5 +408,5 @@ current package usage, remaining data, renewal information, and the last
 successful update time for each account.
 
 Because individual account data is preserved when a collection fails, a
-temporary login or portal failure does not remove that account from the
-dashboard.
+temporary authentication, API, network, or portal failure does not
+remove that account from the dashboard.
