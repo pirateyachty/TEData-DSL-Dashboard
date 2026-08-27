@@ -3,6 +3,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 from playwright.sync_api import sync_playwright
@@ -41,6 +42,7 @@ QUOTA_URL = (
 )
 
 REQUEST_TIMEOUT = 30
+CAIRO_TZ = ZoneInfo("Africa/Cairo")
 
 
 class SessionRejected(Exception):
@@ -53,13 +55,12 @@ class CollectionError(Exception):
 
 def tsConv(unix_timestamp, returnUntil=False):
     dt_utc = datetime.fromtimestamp(unix_timestamp / 1000.0, tz=timezone.utc)
-    local_tz = datetime.now().astimezone().tzinfo
-    dt_local = dt_utc.astimezone(local_tz)
+    dt_local = dt_utc.astimezone(CAIRO_TZ)
     formatted_date = dt_local.strftime("%d/%m/%Y at %I:%M %p")
     dates = [formatted_date]
 
     if returnUntil:
-        now_local = datetime.now().astimezone(local_tz)
+        now_local = datetime.now(CAIRO_TZ)
         time_difference = dt_local - now_local
 
         if time_difference <= timedelta(days=1):
