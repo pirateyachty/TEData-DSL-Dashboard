@@ -182,72 +182,47 @@
             }
         }
 
-
-        function roundToNearestHour(date) {
-            return new Date(
-                Math.round(date.getTime() / (60 * 60 * 1000)) * (60 * 60 * 1000)
-            );
-        }
-
-        function formatRoundedHour(date) {
-            return date.toLocaleTimeString([], {
-                hour: '2-digit',
-                minute: '2-digit',
-                hour12: false
-            });
-        }
-
         function updateStatusSummary() {
             const statusDiv = document.getElementById('status-summary');
 
-            const roundedUpdates = accountsData
-                .map(account => {
-                    if (!account.lastUpdated) return null;
-
-                    const updated = new Date(account.lastUpdated);
-                    if (Number.isNaN(updated.getTime())) return null;
-
-                    // Match the per-account display: convert in the browser's
-                    // local timezone, then group updates by nearest hour.
-                    return roundToNearestHour(updated);
-                })
-                .filter(Boolean);
-
-            if (roundedUpdates.length === 0) {
-                statusDiv.textContent = 'Status: No update data';
-                return;
-            }
-
-            const latestMs = Math.max(...roundedUpdates.map(date => date.getTime()));
+            const nowMs = Date.now();
+            const sixHoursMs = 6 * 60 * 60 * 1000;
             const twelveHoursMs = 12 * 60 * 60 * 1000;
 
             let current = 0;
-            let underTwelveHoursOld = 0;
+            let sixToTwelveHoursOld = 0;
             let twelvePlusHoursOld = 0;
 
-            roundedUpdates.forEach(date => {
-                const ageMs = latestMs - date.getTime();
+            accountsData.forEach(account => {
+                if (!account.lastUpdated) {
+                    twelvePlusHoursOld += 1;
+                    return;
+                }
 
-                if (ageMs === 0) {
+                const updated = new Date(account.lastUpdated);
+
+                if (Number.isNaN(updated.getTime())) {
+                    twelvePlusHoursOld += 1;
+                    return;
+                }
+
+                const ageMs = nowMs - updated.getTime();
+
+                if (ageMs < sixHoursMs) {
                     current += 1;
                 } else if (ageMs < twelveHoursMs) {
-                    underTwelveHoursOld += 1;
+                    sixToTwelveHoursOld += 1;
                 } else {
                     twelvePlusHoursOld += 1;
                 }
             });
 
-            // Accounts without a usable lastUpdated value belong in the
-            // oldest/stale category rather than disappearing from the status.
-            twelvePlusHoursOld += accountsData.length - roundedUpdates.length;
-
             const total = accountsData.length;
-            const currentTime = formatRoundedHour(new Date(latestMs));
 
             statusDiv.innerHTML = `
-                <span class="status-current">${current}/${total} Current (${currentTime})</span>
+                <span class="status-current">${current}/${total} Current</span>
                 <span class="status-divider">-</span>
-                <span class="status-stale">${underTwelveHoursOld}/${total} &lt;12h Old</span>
+                <span class="status-stale">${sixToTwelveHoursOld}/${total} 6–12h Old</span>
                 <span class="status-divider">-</span>
                 <span class="status-old">${twelvePlusHoursOld}/${total} 12h+ Old</span>
             `;
